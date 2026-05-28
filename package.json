@@ -1,0 +1,13 @@
+{
+  "name": "silent-creator",
+  "version": "1.0.0",
+  "description": "An infinite lo-fi anime life story game",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}

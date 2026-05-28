@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+backend/video_cache.json
+backend/generated_nodes.json
+backend/__pycache__/
+__pycache__/
+*.pyc
+.DS_Store

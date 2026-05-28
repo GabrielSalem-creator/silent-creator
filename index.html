@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Silent Creator</title>
+<link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+
+<div id="grain"></div>
+<div id="vignette"></div>
+
+<!-- ── INTRO ── -->
+<div class="screen" id="intro">
+  <div class="intro-bg"></div>
+  <canvas id="intro-canvas" style="position:absolute;inset:0;width:100%;height:100%;opacity:.4"></canvas>
+  <div class="intro-logo">Silent Creator</div>
+  <div class="intro-sub">An Interactive Lo‑Fi Story</div>
+  <div class="intro-hint">— anywhere to begin —</div>
+</div>
+
+<!-- ── UNIVERSE SELECT ── -->
+<div class="screen hidden" id="universe-select">
+  <div class="universe-bg"></div>
+  <div class="select-title">choose your universe</div>
+  <div class="universe-cards">
+
+    <div class="ucard monolith" data-id="monolith">
+      <div class="ucard-bg"></div>
+      <div class="ucard-particles" id="p-monolith"></div>
+      <div class="ucard-overlay"></div>
+      <div class="ucard-content">
+        <div class="ucard-name">The Monolith</div>
+        <div class="ucard-sub">Solo Developer<br>Midnight Hackathon</div>
+        <div class="ucard-enter"><span class="enter-line"></span><span>enter</span></div>
+      </div>
+    </div>
+
+    <div class="ucard architect" data-id="architect">
+      <div class="ucard-bg"></div>
+      <div class="ucard-particles" id="p-architect"></div>
+      <div class="ucard-overlay"></div>
+      <div class="ucard-content">
+        <div class="ucard-name">The Architect</div>
+        <div class="ucard-sub">Blueprint Studio<br>Golden Hour</div>
+        <div class="ucard-enter"><span class="enter-line"></span><span>enter</span></div>
+      </div>
+    </div>
+
+    <div class="ucard neoncoast" data-id="neoncoast">
+      <div class="ucard-bg"></div>
+      <div class="ucard-particles" id="p-neoncoast"></div>
+      <div class="ucard-overlay"></div>
+      <div class="ucard-content">
+        <div class="ucard-name">The Neon Coast</div>
+        <div class="ucard-sub">Coastal Night Train<br>Dusk</div>
+        <div class="ucard-enter"><span class="enter-line"></span><span>enter</span></div>
+      </div>
+    </div>
+
+    <div class="ucard theascent" data-id="theascent">
+      <div class="ucard-bg"></div>
+      <div class="ucard-particles" id="p-theascent"></div>
+      <div class="ucard-overlay"></div>
+      <div class="ucard-content">
+        <div class="ucard-name">The Ascent</div>
+        <div class="ucard-sub">Bouldering Gym<br>11 PM · Problem 7B</div>
+        <div class="ucard-enter"><span class="enter-line"></span><span>enter</span></div>
+      </div>
+    </div>
+
+    <div class="ucard thegrid" data-id="thegrid">
+      <div class="ucard-bg"></div>
+      <div class="ucard-particles" id="p-thegrid"></div>
+      <div class="ucard-overlay"></div>
+      <div class="ucard-content">
+        <div class="ucard-name">The Grid</div>
+        <div class="ucard-sub">Penthouse Office<br>4 AM · Position Open</div>
+        <div class="ucard-enter"><span class="enter-line"></span><span>enter</span></div>
+      </div>
+    </div>
+
+    <div class="ucard thewheel" data-id="thewheel">
+      <div class="ucard-bg"></div>
+      <div class="ucard-particles" id="p-thewheel"></div>
+      <div class="ucard-overlay"></div>
+      <div class="ucard-content">
+        <div class="ucard-name">The Wheel</div>
+        <div class="ucard-sub">Night Taxi<br>2:30 AM · Between Fares</div>
+        <div class="ucard-enter"><span class="enter-line"></span><span>enter</span></div>
+      </div>
+    </div>
+
+    <div class="ucard thedrift" data-id="thedrift">
+      <div class="ucard-bg"></div>
+      <div class="ucard-particles" id="p-thedrift"></div>
+      <div class="ucard-overlay"></div>
+      <div class="ucard-content">
+        <div class="ucard-name">The Drift</div>
+        <div class="ucard-sub">Small Apartment<br>Day 34 · 10 AM Tuesday</div>
+        <div class="ucard-enter"><span class="enter-line"></span><span>enter</span></div>
+      </div>
+    </div>
+
+    <div class="ucard thecraft" data-id="thecraft">
+      <div class="ucard-bg"></div>
+      <div class="ucard-particles" id="p-thecraft"></div>
+      <div class="ucard-overlay"></div>
+      <div class="ucard-content">
+        <div class="ucard-name">The Craft</div>
+        <div class="ucard-sub">Ceramics Studio<br>Kyoto Dusk</div>
+        <div class="ucard-enter"><span class="enter-line"></span><span>enter</span></div>
+      </div>
+    </div>
+
+    <div class="ucard nightshift" data-id="nightshift">
+      <div class="ucard-bg"></div>
+      <div class="ucard-particles" id="p-nightshift"></div>
+      <div class="ucard-overlay"></div>
+      <div class="ucard-content">
+        <div class="ucard-name">The Night Shift</div>
+        <div class="ucard-sub">24H Konbini<br>3:30 AM Osaka</div>
+        <div class="ucard-enter"><span class="enter-line"></span><span>enter</span></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── GAME ── -->
+<div class="screen hidden" id="game">
+  <canvas id="scene-canvas"></canvas>
+  <video id="video-action" playsinline muted></video>
+  <video id="video-static" playsinline muted loop></video>
+  <div id="scanlines"></div>
+
+  <div id="top-bar">
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <span id="universe-label"></span>
+      <span id="node-label"></span>
+      <span id="time-display"></span>
+    </div>
+    <div id="back-btn" title="back">↩</div>
+  </div>
+
+  <div id="depth-dots"></div>
+
+  <div id="choices">
+    <div class="choice" id="choice-a" tabindex="0">
+      <div class="choice-glow" id="glow-a"></div>
+      <span class="choice-sym" id="sym-a"></span>
+      <span class="choice-label" id="label-a"></span>
+    </div>
+    <div class="choice" id="choice-b" tabindex="0">
+      <div class="choice-glow" id="glow-b"></div>
+      <span class="choice-sym" id="sym-b"></span>
+      <span class="choice-label" id="label-b"></span>
+    </div>
+  </div>
+</div>
+
+<!-- ── LOADING ── -->
+<div class="screen hidden" id="loading">
+  <div class="loading-orb" id="loading-orb"></div>
+  <div class="loading-messages" id="loading-msg">composing the moment</div>
+</div>
+
+<!-- ── MUSIC BAR ── -->
+<div id="music-bar">
+  <div class="music-station">
+    <div class="music-dot" id="music-dot"></div>
+    <span class="music-name" id="music-name">—</span>
+  </div>
+  <div class="music-controls">
+    <button class="music-btn" id="prev-btn">◀</button>
+    <button class="music-btn" id="play-btn">▶</button>
+    <button class="music-btn" id="next-btn">▶▶</button>
+  </div>
+  <input type="range" class="vol-slider" id="vol" min="0" max="1" step="0.05" value="0.65">
+</div>
+
+<audio id="music-audio" preload="none"></audio>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

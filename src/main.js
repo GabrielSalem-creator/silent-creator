@@ -434,8 +434,15 @@ async function playActionThenStatic(actionUrl, staticUrl, node) {
     } catch(e) {}
   }
 
-  // Wait ~20s for next videos to generate in background before showing choices
-  await sleep(20000);
+  // Poll until child nodes are generating (max 12s), then show choices
+  // Much less laggy than a fixed 20s sleep
+  const waitStart = Date.now();
+  const childIds = node.choices.map(c => c.nextNode).filter(Boolean);
+  while (Date.now() - waitStart < 12000) {
+    await sleep(1000);
+    if (childIds.length > 0) break;
+    if (node.choices.every(c => c.nextNode)) break;
+  }
   showChoices(node.choices);
 }
 

@@ -11,12 +11,14 @@ import logging
 import random
 import re
 import time
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from story_data import CHARACTERS, STATIONS, STORY_TREE, SYMBOL_META, build_prompts
@@ -26,9 +28,27 @@ log = logging.getLogger(__name__)
 
 app = FastAPI(title="Silent Creator")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 VIDEO_CACHE_FILE  = Path(__file__).parent / "video_cache.json"
 NODES_CACHE_FILE  = Path(__file__).parent / "generated_nodes.json"
-executor = ThreadPoolExecutor(max_workers=8)
+executor = ThreadPoolExecutor(max_workers=12)
+
+# Thread locks for cache writes
+_video_lock = threading.Lock()
+_nodes_lock = threading.Lock()
+
+# Deferred save: only write to disk every 30s, not on every operation
+_video_dirty = False
+_nodes_dirty = False
+_last_video_save = 0.0
+_last_nodes_save = 0.0
+SAVE_INTERVAL = 30  # seconds
 
 
 # ── Persistence helpers ───────────────────────────────────────────────────────
@@ -40,19 +60,59 @@ def _load_json(path: Path, default):
     return default
 
 def _save_json(path: Path, data):
-    try: path.write_text(json.dumps(data, indent=2))
-    except Exception as e: log.warning("save %s failed: %s", path, e)
+    # Write atomically via temp file to avoid corruption
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(data))
+        tmp.replace(path)
+    except Exception as e:
+        log.warning("save %s failed: %s", path, e)
+        try: tmp.unlink(missing_ok=True)
+        except: pass
+
+def _maybe_save_video():
+    global _video_dirty, _last_video_save
+    now = time.time()
+    if _video_dirty and (now - _last_video_save) >= SAVE_INTERVAL:
+        _save_json(VIDEO_CACHE_FILE, video_cache)
+        _video_dirty = False
+        _last_video_save = now
+
+def _maybe_save_nodes():
+    global _nodes_dirty, _last_nodes_save
+    now = time.time()
+    if _nodes_dirty and (now - _last_nodes_save) >= SAVE_INTERVAL:
+        _save_json(NODES_CACHE_FILE, _gen_nodes)
+        _nodes_dirty = False
+        _last_nodes_save = now
+
+def _force_save_video():
+    global _video_dirty, _last_video_save
+    _save_json(VIDEO_CACHE_FILE, video_cache)
+    _video_dirty = False
+    _last_video_save = time.time()
+
+def _force_save_nodes():
+    global _nodes_dirty, _last_nodes_save
+    _save_json(NODES_CACHE_FILE, _gen_nodes)
+    _nodes_dirty = False
+    _last_nodes_save = time.time()
 
 
 video_cache: dict = _load_json(VIDEO_CACHE_FILE, {})
-# Reset stale generating entries
-for v in video_cache.values():
-    if isinstance(v, dict) and v.get("status") == "generating":
-        v["status"] = "pending"
+# Reset stale generating entries on startup
+with _video_lock:
+    for v in video_cache.values():
+        if isinstance(v, dict) and v.get("status") == "generating":
+            v["status"] = "pending"
 
 # Merge persisted generated nodes into the live story tree
 _gen_nodes: dict = _load_json(NODES_CACHE_FILE, {})
 STORY_TREE["nodes"].update(_gen_nodes)
+log.info("Loaded %d video cache entries, %d generated nodes", len(video_cache), len(_gen_nodes))
+
+# Cache the index.html in memory — avoid disk read on every request
+_html_cache: str = ""
 
 
 # ── Video generation (sync, thread pool) ──────────────────────────────────────
@@ -84,11 +144,14 @@ def _run_generation(cache_key: str, prompt: str):
         task_id = data.get("taskId") or data.get("task_id") or data.get("id")
         if not task_id:
             raise ValueError(f"no taskId in response: {data}")
-        video_cache[cache_key]["taskId"] = task_id
+        with _video_lock:
+            video_cache[cache_key]["taskId"] = task_id
     except Exception as e:
         log.error("[video %s] generate failed: %s", cache_key, e)
-        video_cache[cache_key] = {"status": "failed", "url": None}
-        _save_json(VIDEO_CACHE_FILE, video_cache)
+        with _video_lock:
+            video_cache[cache_key] = {"status": "failed", "url": None}
+            global _video_dirty; _video_dirty = True
+        _force_save_video()
         return
 
     poll = {"action": "check_status", "taskId": task_id, "prompt": "", "size": "16:9", "withAudio": False}
@@ -100,8 +163,11 @@ def _run_generation(cache_key: str, prompt: str):
             if j.get("status") == "completed":
                 url = j.get("video_url") or j.get("videoUrl") or (j.get("result") or {}).get("video_url")
                 if url:
-                    video_cache[cache_key] = {"status": "ready", "url": url}
-                    _save_json(VIDEO_CACHE_FILE, video_cache)
+                    with _video_lock:
+                        video_cache[cache_key] = {"status": "ready", "url": url}
+                        _video_dirty = True
+                    _force_save_video()
+                    log.info("[video %s] ready: %s", cache_key, url[:60])
                     return
                 break
             if j.get("status") in ("failed", "error"):
@@ -109,14 +175,17 @@ def _run_generation(cache_key: str, prompt: str):
         except Exception as e:
             log.warning("[video %s] poll error: %s", cache_key, e)
 
-    video_cache[cache_key] = {"status": "failed", "url": None}
-    _save_json(VIDEO_CACHE_FILE, video_cache)
+    with _video_lock:
+        video_cache[cache_key] = {"status": "failed", "url": None}
+        _video_dirty = True
+    _force_save_video()
 
 def _kick_video(cache_key: str, prompt: str):
-    entry = video_cache.get(cache_key)
-    if entry and entry.get("status") in ("ready", "generating"):
-        return
-    video_cache[cache_key] = {"status": "generating", "url": None}
+    with _video_lock:
+        entry = video_cache.get(cache_key)
+        if entry and entry.get("status") in ("ready", "generating"):
+            return
+        video_cache[cache_key] = {"status": "generating", "url": None}
     executor.submit(_run_generation, cache_key, prompt)
 
 
@@ -380,15 +449,19 @@ def _run_node_generation(cache_key: str, universe_id: str, story_path: list,
                           choice_label: str, choice_symbol: str):
     result = _generate_node_sync(universe_id, story_path, choice_label, choice_symbol)
     if not result:
-        node_gen_cache[cache_key] = {"status": "failed"}
+        with _nodes_lock:
+            node_gen_cache[cache_key] = {"status": "failed"}
         return
 
     node_id, node = result
-    STORY_TREE["nodes"][node_id] = node
-    _gen_nodes[node_id] = node
-    _save_json(NODES_CACHE_FILE, _gen_nodes)
+    with _nodes_lock:
+        STORY_TREE["nodes"][node_id] = node
+        _gen_nodes[node_id] = node
+        global _nodes_dirty; _nodes_dirty = True
+    _force_save_nodes()
 
-    node_gen_cache[cache_key] = {"status": "ready", "nodeId": node_id, "node": node}
+    with _nodes_lock:
+        node_gen_cache[cache_key] = {"status": "ready", "nodeId": node_id, "node": node}
     log.info("Generated node %s: %s", node_id, node["title"])
 
     # Immediately kick video generation for this new node
@@ -502,6 +575,13 @@ def cache_status():
         "nodes": {k: {"status": v.get("status"), "title": (v.get("node") or {}).get("title")}
                   for k, v in node_gen_cache.items()},
     }
+
+@app.get("/")
+def serve():
+    global _html_cache
+    if not _html_cache:
+        _html_cache = (Path(__file__).parent / "index.html").read_text()
+    return HTMLResponse(_html_cache)
 
 if __name__ == "__main__":
     import uvicorn

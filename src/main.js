@@ -375,19 +375,13 @@ async function loadNode(nodeId) {
   // Quick check: are both videos already cached and ready?
   const cachedAction = getLocalVideoUrl(nodeId, 'action');
   const cachedStatic = getLocalVideoUrl(nodeId, 'static');
-  const actionPrompt = node.actionPrompt || '';
-  const staticPrompt = node.staticPrompt || '';
-  const [qa, qs] = await Promise.all([
-    cachedAction ? Promise.resolve({ status: 'ready', url: cachedAction }) : apiVideo(nodeId, 'action', actionPrompt),
-    cachedStatic ? Promise.resolve({ status: 'ready', url: cachedStatic }) : apiVideo(nodeId, 'static', staticPrompt),
-  ]);
-  const alreadyReady = !!(qa.status === 'ready' && qa.url && qs.status === 'ready' && qs.url);
+  const alreadyReady = !!(cachedAction && cachedStatic);
 
   if (!alreadyReady) showLoading(true);
 
   const [actionUrl, staticUrl] = await Promise.all([
-    alreadyReady ? Promise.resolve(qa.url) : waitForVideo(nodeId, 'action'),
-    alreadyReady ? Promise.resolve(qs.url) : waitForVideo(nodeId, 'static'),
+    alreadyReady ? Promise.resolve(cachedAction) : waitForVideo(nodeId, 'action'),
+    alreadyReady ? Promise.resolve(cachedStatic) : waitForVideo(nodeId, 'static'),
     generateNextNodes(nodeId, node),
   ]);
 
@@ -401,16 +395,16 @@ async function waitForVideo(nodeId, type) {
   if (local) return local;
   const node = S.tree.nodes[nodeId];
   const prompt = type === 'action' ? (node?.actionPrompt || '') : (node?.staticPrompt || '');
-  // Kick + poll. Backend handles dedup — safe to call repeatedly.
-  for (let i = 0; i < 120; i++) {
+  // Backend now performs deterministic generation/polling per request.
+  // Keep a few retries for transient network errors only.
+  for (let i = 0; i < 4; i++) {
     const r = await apiVideo(nodeId, type, prompt);
     if (r.status === 'ready' && r.url) {
       setLocalVideoUrl(nodeId, type, r.url);
       return r.url;
     }
     if (r.status === 'failed') return null;
-    // still generating — wait then retry
-    await sleep(3000);
+    await sleep(1200);
     updateLoadingMsg();
   }
   return null;
@@ -454,15 +448,9 @@ async function playActionThenStatic(actionUrl, staticUrl, node) {
     } catch(e) {}
   }
 
-  // Poll until child nodes are generating (max 12s), then show choices
-  // Much less laggy than a fixed 20s sleep
-  const waitStart = Date.now();
-  const childIds = node.choices.map(c => c.nextNode).filter(Boolean);
-  while (Date.now() - waitStart < 12000) {
-    await sleep(1000);
-    if (childIds.length > 0) break;
-    if (node.choices.every(c => c.nextNode)) break;
-  }
+  // Critical UX: decisions appear only after both branches are fully prepared
+  // (node + action/static videos generated and preloaded in browser cache).
+  await prepareDecisionMedia(node);
   showChoices(node.choices);
 }
 
@@ -495,7 +483,7 @@ function showChoices(chArr) {
   kickPrefetch(chArr.map(c => c.nextNode).filter(Boolean));
 }
 
-function onChoose(choice) {
+async function onChoose(choice) {
   choices.classList.remove('visible');
   videoAction.pause(); videoAction.src = '';
   videoStatic.pause(); videoStatic.src = '';
@@ -520,6 +508,16 @@ function onChoose(choice) {
     location: loc,
     timeOfDay: currentNode?.timeOfDay || '',
   });
+
+  if (!choice.nextNode) {
+    const idx = Math.max(0, currentNode.choices.indexOf(choice));
+    await generateOneNode(S.nodeId, idx, choice, S.storyPath);
+  }
+  if (!choice.nextNode) {
+    // fallback: restore decisions if generation failed
+    showChoices(currentNode.choices);
+    return;
+  }
 
   loadNode(choice.nextNode);
 }
@@ -682,6 +680,72 @@ function updateDepthDots(depth) {
 
 // ── Utils ────────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function prepareDecisionMedia(node) {
+  // Ensure both choices have generated next nodes first.
+  for (let i = 0; i < node.choices.length; i++) {
+    const choice = node.choices[i];
+    if (!choice.nextNode) {
+      await generateOneNode(S.nodeId, i, choice, S.storyPath);
+    }
+  }
+
+  const childIds = node.choices.map(c => c.nextNode).filter(Boolean);
+  if (!childIds.length) return;
+
+  const prepTasks = [];
+  for (const childId of childIds) {
+    const childNode = S.tree.nodes[childId];
+    if (!childNode) continue;
+    prepTasks.push(ensureDecisionVideoReady(childId, 'action', childNode.actionPrompt || ''));
+    prepTasks.push(ensureDecisionVideoReady(childId, 'static', childNode.staticPrompt || ''));
+  }
+  const urls = (await Promise.all(prepTasks)).filter(Boolean);
+  await warmVideoUrls(urls);
+}
+
+async function ensureDecisionVideoReady(nodeId, type, prompt) {
+  const cached = getLocalVideoUrl(nodeId, type);
+  if (cached) return cached;
+  const r = await apiVideo(nodeId, type, prompt);
+  if (r.status === 'ready' && r.url) {
+    setLocalVideoUrl(nodeId, type, r.url);
+    return r.url;
+  }
+  return '';
+}
+
+async function warmVideoUrls(urls) {
+  const uniq = [...new Set(urls.filter(Boolean))];
+  if (!uniq.length) return;
+  await Promise.all(uniq.map((u) => preloadVideoElement(u)));
+}
+
+function preloadVideoElement(url) {
+  return new Promise((resolve) => {
+    const v = document.createElement('video');
+    v.preload = 'auto';
+    v.muted = true;
+    v.playsInline = true;
+    v.src = url;
+    v.style.position = 'fixed';
+    v.style.width = '1px';
+    v.style.height = '1px';
+    v.style.opacity = '0';
+    v.style.pointerEvents = 'none';
+    document.body.appendChild(v);
+    const done = () => {
+      v.removeEventListener('canplay', done);
+      v.removeEventListener('error', done);
+      setTimeout(() => v.remove(), 100);
+      resolve();
+    };
+    v.addEventListener('canplay', done);
+    v.addEventListener('error', done);
+    v.load();
+    setTimeout(done, 2200);
+  });
+}
 
 async function apiVideo(nodeId, type, prompt = '') {
   try {

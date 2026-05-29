@@ -193,8 +193,21 @@ def _kick_video(cache_key: str, prompt: str):
 
 ALLOWED_SYMBOLS = {"✨", "💼", "💬", "🌸", "❤️", "☕", "💤"}
 
+PRODUCTION_BRIEF = """\
+LOFI PRODUCTION BRIEF:
+- Infinite life story paced like episodes.
+- Every node has two videos: ACTION (4s once) then STATIC (same exact scene, waiting loop).
+- Keep emotional continuity and meaningful choices.
+- Keep visual symbolism and anime lo-fi mood in every frame.
+"""
+
 GPT_SYSTEM = """\
 You are an INFINITE LIFE SIMULATION ENGINE. You generate real, specific, human moments in a person's life — not story scenes, not summaries. One cinematic instant. The kind you remember.
+
+═══ ANIME VISUAL LOCK — non-negotiable ═══
+This world is ALWAYS stylized 2D lo-fi anime.
+Never drift into live action, photography, realistic skin, CGI, or documentary tone.
+The scene must feel like a hand-drawn anime frame at all times.
 
 ═══ COHERENCE MANDATE — most important rule ═══
 
@@ -228,6 +241,9 @@ Every scene must CONTINUE from the previous one. Specifically:
 
 6. PERSONA ENCOUNTERS — occasionally (depth 3+), introduce a specific named person the protagonist encounters: a stranger, a neighbor, a passenger, someone who asks a question that changes something. Give them a profession and one specific detail. One choice may involve following or staying with this person.
 
+7. STYLE WORDING — actionDescription and staticDescription should describe movement/stillness only.
+   Do not add camera jargon that implies real-life filming, and do not add any photoreal keywords.
+
 ═══ OUTPUT FORMAT ═══
 
 Return ONLY this JSON. Nothing outside it:
@@ -243,6 +259,31 @@ Return ONLY this JSON. Nothing outside it:
     { "symbol": "different symbol", "label": "3-5 word lowercase phrase, different dimension" }
   ]
 }"""
+
+_ANIME_BANNED = (
+    "photorealistic",
+    "photo-realistic",
+    "realistic skin",
+    "real person",
+    "live action",
+    "live-action",
+    "dslr",
+    "8k photo",
+    "hyperreal",
+    "hyper-real",
+    "cgi",
+    "3d render",
+    "documentary",
+)
+
+
+def _sanitize_anime_text(value: str) -> str:
+    if not isinstance(value, str):
+        return ""
+    out = value
+    for token in _ANIME_BANNED:
+        out = re.sub(token, "illustrated anime", out, flags=re.IGNORECASE)
+    return out.strip()
 
 
 def _call_gpt(messages: list) -> dict | None:
@@ -365,6 +406,8 @@ WORLD TRACKING:
 
 THE PLAYER JUST CHOSE: "{choice_label}" ({choice_symbol})
 
+{PRODUCTION_BRIEF}
+
 Generate the next scene. It must continue directly from the previous scene's context above. Reference something specific from it. Then take the story somewhere new."""
 
     raw = _call_gpt([
@@ -387,16 +430,21 @@ Generate the next scene. It must continue directly from the previous scene's con
         return None
 
     # Use new `location` field (fallback to old `locationNote`)
-    location = (data.get("location") or data.get("locationNote") or "").strip()
+    location = _sanitize_anime_text((data.get("location") or data.get("locationNote") or "").strip())
     env_override = location if location and location.lower() not in ("same", "same as before", "") else None
+
+    action_desc = _sanitize_anime_text(data.get("actionDescription", "breathes slowly, staring forward."))
+    static_desc = _sanitize_anime_text(data.get("staticDescription", "sits still, ambient environment looping gently."))
+    narrative_context = _sanitize_anime_text(data.get("narrativeContext", ""))
+    time_of_day = _sanitize_anime_text(data.get("timeOfDay", ""))
 
     action_prompt, static_prompt = build_prompts(
         universe_id,
-        data.get("actionDescription", "breathes slowly, staring forward."),
-        data.get("staticDescription", "sits still, ambient environment looping gently."),
+        action_desc,
+        static_desc,
         location_override=env_override,
-        narrative_context=data.get("narrativeContext", ""),
-        time_of_day=data.get("timeOfDay", ""),
+        narrative_context=narrative_context,
+        time_of_day=time_of_day,
     )
 
     choices_raw = data.get("choices", [])
@@ -427,12 +475,12 @@ Generate the next scene. It must continue directly from the previous scene's con
     node = {
         "universeId": universe_id,
         "title": data.get("title", "A Moment"),
-        "timeOfDay": data.get("timeOfDay", ""),
+        "timeOfDay": time_of_day,
         "location": location,
         "depth": depth,
         "actionPrompt": action_prompt,
         "staticPrompt": static_prompt,
-        "narrativeContext": data.get("narrativeContext", ""),
+        "narrativeContext": narrative_context,
         "choices": choices,
         "generated": True,
     }

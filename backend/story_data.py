@@ -210,9 +210,10 @@ def build_prompts(universe_id: str, action_desc: str, static_desc: str,
         context_prefix += f"Mood: {narrative_context} "
 
     base = (
-        "2D lofi anime illustration. Studio Ghibli aesthetic. 90s retro cel-shaded animation. "
-        "Hand-drawn style. Soft pastel color palette. Moody ambient lighting. "
-        "NOT photorealistic. NOT live action. NOT CGI. NOT 3D render. Illustrated anime only. "
+        "2D lofi anime illustration frame. Studio Ghibli aesthetic. 90s retro cel-shaded animation. "
+        "Hand-drawn line art with ink outlines. Painted anime background. Soft pastel color palette. Moody ambient lighting. "
+        "Classic anime proportions and facial styling. Lo-fi cozy atmosphere. "
+        "NOT photorealistic. NOT realistic skin texture. NOT live action. NOT CGI. NOT 3D render. NOT DSLR photo. Illustrated anime only. "
         f"{env} "
         f"Illustrated anime character — {c['seed']} "
         f"{context_prefix}"

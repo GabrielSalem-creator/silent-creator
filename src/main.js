@@ -385,26 +385,46 @@ async function loadNode(nodeId) {
     generateNextNodes(nodeId, node),
   ]);
 
+  let resolvedAction = actionUrl;
+  let resolvedStatic = staticUrl;
+  if (!resolvedAction && !resolvedStatic) {
+    // Hard retry path: do not continue to an empty scene.
+    for (let i = 0; i < 3; i++) {
+      updateLoadingMsg();
+      resolvedStatic = await waitForVideo(nodeId, 'static', { attempts: 2, delayMs: 1200 });
+      if (resolvedStatic) break;
+      resolvedAction = await waitForVideo(nodeId, 'action', { attempts: 2, delayMs: 1200 });
+      if (resolvedAction) break;
+    }
+  }
+
   if (!alreadyReady) showLoading(false);
 
-  await playActionThenStatic(actionUrl, staticUrl, node);
+  if (!resolvedAction && !resolvedStatic) {
+    // Last fallback: keep trying this node instead of showing blank media.
+    await sleep(1200);
+    return loadNode(nodeId);
+  }
+
+  await playActionThenStatic(resolvedAction, resolvedStatic, node);
 }
 
-async function waitForVideo(nodeId, type) {
+async function waitForVideo(nodeId, type, opts = {}) {
+  const attempts = Number(opts.attempts ?? 4);
+  const delayMs = Number(opts.delayMs ?? 1200);
   const local = getLocalVideoUrl(nodeId, type);
   if (local) return local;
   const node = S.tree.nodes[nodeId];
   const prompt = type === 'action' ? (node?.actionPrompt || '') : (node?.staticPrompt || '');
   // Backend now performs deterministic generation/polling per request.
-  // Keep a few retries for transient network errors only.
-  for (let i = 0; i < 4; i++) {
+  // Retry failed/transient responses by calling again (can trigger a fresh generation).
+  for (let i = 0; i < attempts; i++) {
     const r = await apiVideo(nodeId, type, prompt);
     if (r.status === 'ready' && r.url) {
       setLocalVideoUrl(nodeId, type, r.url);
       return r.url;
     }
-    if (r.status === 'failed') return null;
-    await sleep(1200);
+    await sleep(delayMs);
     updateLoadingMsg();
   }
   return null;
@@ -450,7 +470,11 @@ async function playActionThenStatic(actionUrl, staticUrl, node) {
 
   // Critical UX: decisions appear only after both branches are fully prepared
   // (node + action/static videos generated and preloaded in browser cache).
-  await prepareDecisionMedia(node);
+  while (!(await prepareDecisionMedia(node))) {
+    // Strict requirement: do not show decisions until branch media is ready.
+    await sleep(900);
+    updateLoadingMsg();
+  }
   showChoices(node.choices);
 }
 
@@ -693,15 +717,30 @@ async function prepareDecisionMedia(node) {
   const childIds = node.choices.map(c => c.nextNode).filter(Boolean);
   if (!childIds.length) return;
 
-  const prepTasks = [];
+  const targets = [];
   for (const childId of childIds) {
     const childNode = S.tree.nodes[childId];
     if (!childNode) continue;
-    prepTasks.push(ensureDecisionVideoReady(childId, 'action', childNode.actionPrompt || ''));
-    prepTasks.push(ensureDecisionVideoReady(childId, 'static', childNode.staticPrompt || ''));
+    targets.push({ nodeId: childId, type: 'action', prompt: childNode.actionPrompt || '' });
+    targets.push({ nodeId: childId, type: 'static', prompt: childNode.staticPrompt || '' });
   }
-  const urls = (await Promise.all(prepTasks)).filter(Boolean);
+  if (!targets.length) return false;
+
+  // Retry until all 4 are ready or timeout.
+  const deadline = Date.now() + 70000;
+  while (Date.now() < deadline) {
+    const pending = targets.filter(t => !getLocalVideoUrl(t.nodeId, t.type));
+    if (!pending.length) break;
+    await Promise.all(pending.map((t) => ensureDecisionVideoReady(t.nodeId, t.type, t.prompt)));
+    if (targets.every(t => !!getLocalVideoUrl(t.nodeId, t.type))) break;
+    await sleep(1200);
+  }
+
+  const urls = targets.map(t => getLocalVideoUrl(t.nodeId, t.type)).filter(Boolean);
+  const allReady = urls.length === targets.length;
+  if (!allReady) return false;
   await warmVideoUrls(urls);
+  return true;
 }
 
 async function ensureDecisionVideoReady(nodeId, type, prompt) {

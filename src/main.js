@@ -34,6 +34,8 @@ const videoStatic = $('video-static');
 const choices = $('choices');
 const sceneCanvas = $('scene-canvas');
 const sceneCtx = sceneCanvas.getContext('2d');
+const VIDEO_URL_CACHE_KEY = 'lofi_video_urls_v1';
+const LOCAL_VIDEO_CACHE = loadLocalVideoCache();
 
 // ── Screen transitions ───────────────────────────────────────────────────────
 function show(name) {
@@ -44,6 +46,7 @@ function show(name) {
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 async function init() {
+  addPreconnectHints();
   [S.tree, S.stations] = await Promise.all([
     fetch('/api/story-tree').then(r => r.json()),
     fetch('/api/stations').then(r => r.json()),
@@ -370,11 +373,13 @@ async function loadNode(nodeId) {
   choices.classList.remove('visible');
 
   // Quick check: are both videos already cached and ready?
+  const cachedAction = getLocalVideoUrl(nodeId, 'action');
+  const cachedStatic = getLocalVideoUrl(nodeId, 'static');
   const [qa, qs] = await Promise.all([
-    fetch(`/api/video?nodeId=${nodeId}&type=action`).then(r=>r.json()).catch(()=>({})),
-    fetch(`/api/video?nodeId=${nodeId}&type=static`).then(r=>r.json()).catch(()=>({})),
+    cachedAction ? Promise.resolve({ status: 'ready', url: cachedAction }) : fetch(`/api/video?nodeId=${nodeId}&type=action`).then(r=>r.json()).catch(()=>({})),
+    cachedStatic ? Promise.resolve({ status: 'ready', url: cachedStatic }) : fetch(`/api/video?nodeId=${nodeId}&type=static`).then(r=>r.json()).catch(()=>({})),
   ]);
-  const alreadyReady = qa.status === 'ready' && qa.url && qs.status === 'ready' && qs.url;
+  const alreadyReady = !!(qa.status === 'ready' && qa.url && qs.status === 'ready' && qs.url);
 
   if (!alreadyReady) showLoading(true);
 
@@ -390,10 +395,15 @@ async function loadNode(nodeId) {
 }
 
 async function waitForVideo(nodeId, type) {
+  const local = getLocalVideoUrl(nodeId, type);
+  if (local) return local;
   // Kick + poll. Backend handles dedup — safe to call repeatedly.
   for (let i = 0; i < 120; i++) {
     const r = await fetch(`/api/video?nodeId=${nodeId}&type=${type}`).then(r => r.json());
-    if (r.status === 'ready' && r.url) return r.url;
+    if (r.status === 'ready' && r.url) {
+      setLocalVideoUrl(nodeId, type, r.url);
+      return r.url;
+    }
     if (r.status === 'failed') return null;
     // still generating — wait then retry
     await sleep(3000);
@@ -411,7 +421,10 @@ async function playActionThenStatic(actionUrl, staticUrl, node) {
 
   // Action video
   if (actionUrl) {
+    setLocalVideoUrl(S.nodeId, 'action', actionUrl);
     videoAction.src = actionUrl;
+    videoAction.preload = 'auto';
+    await waitCanPlay(videoAction, 2500);
     videoAction.style.opacity = '1';
     videoStatic.style.opacity = '0';
     try {
@@ -425,8 +438,11 @@ async function playActionThenStatic(actionUrl, staticUrl, node) {
 
   // Static video
   if (staticUrl) {
+    setLocalVideoUrl(S.nodeId, 'static', staticUrl);
     videoStatic.src = staticUrl;
     videoStatic.loop = true;
+    videoStatic.preload = 'auto';
+    await waitCanPlay(videoStatic, 2500);
     try {
       await videoStatic.play();
       videoStatic.style.opacity = '1';
@@ -472,6 +488,7 @@ function showChoices(chArr) {
   choiceB.onkeydown = e => e.key === 'Enter' && onChoose(b);
 
   choices.classList.add('visible');
+  kickPrefetch(chArr.map(c => c.nextNode).filter(Boolean));
 }
 
 function onChoose(choice) {
@@ -513,7 +530,7 @@ async function generateNextNodes(nodeId, node) {
 }
 
 async function generateOneNode(parentNodeId, choiceIndex, choice, storyPath) {
-  await fetch('/api/generate-node', {
+  const first = await fetch('/api/generate-node', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
@@ -524,7 +541,14 @@ async function generateOneNode(parentNodeId, choiceIndex, choice, storyPath) {
       choiceSymbol: choice.symbol,
       storyPath,
     }),
-  }).catch(() => {});
+  }).then(r => r.json()).catch(() => ({}));
+
+  if (first.status === 'ready' && first.nodeId) {
+    choice.nextNode = first.nodeId;
+    S.tree.nodes[first.nodeId] = first.node;
+    kickChildren(first.nodeId, first.node, storyPath);
+    return;
+  }
 
   for (let i = 0; i < 25; i++) {
     await sleep(3000);
@@ -654,6 +678,63 @@ function updateDepthDots(depth) {
 
 // ── Utils ────────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function waitCanPlay(video, timeoutMs = 2000) {
+  return new Promise((resolve) => {
+    if (video.readyState >= 2) return resolve();
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      video.removeEventListener('canplay', finish);
+      resolve();
+    };
+    video.addEventListener('canplay', finish);
+    setTimeout(finish, timeoutMs);
+  });
+}
+
+function loadLocalVideoCache() {
+  try {
+    return JSON.parse(localStorage.getItem(VIDEO_URL_CACHE_KEY) || '{}');
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveLocalVideoCache() {
+  try {
+    localStorage.setItem(VIDEO_URL_CACHE_KEY, JSON.stringify(LOCAL_VIDEO_CACHE));
+  } catch (_) {}
+}
+
+function getLocalVideoUrl(nodeId, type) {
+  return LOCAL_VIDEO_CACHE?.[nodeId]?.[type] || '';
+}
+
+function setLocalVideoUrl(nodeId, type, url) {
+  if (!url) return;
+  if (!LOCAL_VIDEO_CACHE[nodeId]) LOCAL_VIDEO_CACHE[nodeId] = {};
+  if (LOCAL_VIDEO_CACHE[nodeId][type] === url) return;
+  LOCAL_VIDEO_CACHE[nodeId][type] = url;
+  saveLocalVideoCache();
+}
+
+function addPreconnectHints() {
+  const hints = [
+    'https://vm.runware.ai',
+    'https://www.nanobananavideo.io',
+    'https://stream-153.zeno.fm',
+    'https://live.radiospinner.com',
+  ];
+  hints.forEach((href) => {
+    const l = document.createElement('link');
+    l.rel = 'preconnect';
+    l.href = href;
+    l.crossOrigin = 'anonymous';
+    document.head.appendChild(l);
+  });
+}
 
 window.addEventListener('resize', () => {
   sceneCanvas.width = window.innerWidth;

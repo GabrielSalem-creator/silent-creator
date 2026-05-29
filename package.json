@@ -4,8 +4,14 @@
   "description": "An infinite lo-fi anime life story game",
   "scripts": {
     "dev": "vite",
+    "dev:api": "node server/index.cjs",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "start:api": "node server/index.cjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
   },
   "devDependencies": {
     "vite": "^5.4.0"

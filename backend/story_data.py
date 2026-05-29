@@ -196,32 +196,39 @@ def build_prompts(universe_id: str, action_desc: str, static_desc: str,
                   narrative_context: str = "",
                   time_of_day: str = "") -> tuple[str, str]:
     c = CHARACTERS[universe_id]
-    env = location_override or c["env_seed"]
+    # Always frame the environment as an anime illustration — never let a raw
+    # realistic location string override the visual style.
+    if location_override:
+        env = f"anime illustrated setting: {location_override}. Soft cel-shaded lighting, hand-drawn textures."
+    else:
+        env = c["env_seed"]
 
     context_prefix = ""
     if time_of_day:
         context_prefix += f"Time: {time_of_day}. "
     if narrative_context:
-        context_prefix += f"Emotional tone: {narrative_context} "
+        context_prefix += f"Mood: {narrative_context} "
 
     base = (
-        "lofi anime style, studio ghibli aesthetic, 90s retro cel animation, "
-        "soft pastel color palette, moody ambient lighting. "
-        f"{env} {c['seed']} "
+        "2D lofi anime illustration. Studio Ghibli aesthetic. 90s retro cel-shaded animation. "
+        "Hand-drawn style. Soft pastel color palette. Moody ambient lighting. "
+        "NOT photorealistic. NOT live action. NOT CGI. NOT 3D render. Illustrated anime only. "
+        f"{env} "
+        f"Illustrated anime character — {c['seed']} "
         f"{context_prefix}"
     )
     action = (
         base +
         f"ACTION: {c['name']} {action_desc} "
-        "4-second clip. No text, no subtitles, no watermarks."
+        "4-second animated clip. Anime illustration style throughout. No text, no subtitles, no watermarks."
     )
     static = (
         base +
-        f"IDLE LOOP — exact same scene and location as above, moment after the action. "
+        f"IDLE LOOP — exact same anime scene and location as above, moment after the action. "
         f"{c['name']} {static_desc} "
         "Character is now still. Same lighting, same objects, same environment. "
         "Only micro-movements: slow breathing, a single blink, one ambient element shifting. "
-        "Seamless loop. No text, no subtitles, no watermarks."
+        "Seamless loop. Anime illustration style. No text, no subtitles, no watermarks."
     )
     return action, static
 

@@ -69,13 +69,16 @@ app.get("/api/stations", (_req, res) => res.json(STATIONS));
 app.get("/api/video", async (req, res) => {
   const nodeId = String(req.query.nodeId || "");
   const type = String(req.query.type || "");
-  if (!nodeId || !["action", "static"].includes(type)) return res.status(400).json({ error: "bad request" });
-  const node = STORY_TREE.nodes[nodeId];
-  if (!node) return res.status(404).json({ error: "node not found" });
+  const prompt = String(req.query.prompt || "");
+  const result = await handleVideoRequest(nodeId, type, prompt);
+  return res.json(result);
+});
 
-  const cacheKey = `${nodeId}_${type}`;
-  const prompt = type === "action" ? node.actionPrompt : node.staticPrompt;
-  const result = await ensureVideoReady(cacheKey, prompt, 56000);
+app.post("/api/video", async (req, res) => {
+  const nodeId = String(req.body?.nodeId || "");
+  const type = String(req.body?.type || "");
+  const prompt = String(req.body?.prompt || "");
+  const result = await handleVideoRequest(nodeId, type, prompt);
   return res.json(result);
 });
 
@@ -142,6 +145,25 @@ if (!process.env.VERCEL) {
 }
 
 module.exports = app;
+
+async function handleVideoRequest(nodeId, type, promptInput = "") {
+  if (!nodeId || !["action", "static"].includes(type)) {
+    return { status: "failed", url: null, error: "bad_request" };
+  }
+
+  let prompt = promptInput || "";
+  if (!prompt) {
+    const node = STORY_TREE.nodes[nodeId];
+    if (node) prompt = type === "action" ? node.actionPrompt : node.staticPrompt;
+  }
+
+  if (!prompt) {
+    return { status: "failed", url: null, error: "prompt_not_found" };
+  }
+
+  const cacheKey = `${nodeId}_${type}`;
+  return ensureVideoReady(cacheKey, prompt, 56000);
+}
 
 async function generateNode(universeId, parentNodeId, idx, choiceLabel, choiceSymbol, storyPath) {
   const cacheKey = `${parentNodeId}_choice${idx}`;

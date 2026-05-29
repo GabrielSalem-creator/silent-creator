@@ -375,9 +375,11 @@ async function loadNode(nodeId) {
   // Quick check: are both videos already cached and ready?
   const cachedAction = getLocalVideoUrl(nodeId, 'action');
   const cachedStatic = getLocalVideoUrl(nodeId, 'static');
+  const actionPrompt = node.actionPrompt || '';
+  const staticPrompt = node.staticPrompt || '';
   const [qa, qs] = await Promise.all([
-    cachedAction ? Promise.resolve({ status: 'ready', url: cachedAction }) : fetch(`/api/video?nodeId=${nodeId}&type=action`).then(r=>r.json()).catch(()=>({})),
-    cachedStatic ? Promise.resolve({ status: 'ready', url: cachedStatic }) : fetch(`/api/video?nodeId=${nodeId}&type=static`).then(r=>r.json()).catch(()=>({})),
+    cachedAction ? Promise.resolve({ status: 'ready', url: cachedAction }) : apiVideo(nodeId, 'action', actionPrompt),
+    cachedStatic ? Promise.resolve({ status: 'ready', url: cachedStatic }) : apiVideo(nodeId, 'static', staticPrompt),
   ]);
   const alreadyReady = !!(qa.status === 'ready' && qa.url && qs.status === 'ready' && qs.url);
 
@@ -397,9 +399,11 @@ async function loadNode(nodeId) {
 async function waitForVideo(nodeId, type) {
   const local = getLocalVideoUrl(nodeId, type);
   if (local) return local;
+  const node = S.tree.nodes[nodeId];
+  const prompt = type === 'action' ? (node?.actionPrompt || '') : (node?.staticPrompt || '');
   // Kick + poll. Backend handles dedup — safe to call repeatedly.
   for (let i = 0; i < 120; i++) {
-    const r = await fetch(`/api/video?nodeId=${nodeId}&type=${type}`).then(r => r.json());
+    const r = await apiVideo(nodeId, type, prompt);
     if (r.status === 'ready' && r.url) {
       setLocalVideoUrl(nodeId, type, r.url);
       return r.url;
@@ -678,6 +682,19 @@ function updateDepthDots(depth) {
 
 // ── Utils ────────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function apiVideo(nodeId, type, prompt = '') {
+  try {
+    const res = await fetch('/api/video', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeId, type, prompt }),
+    });
+    return await res.json();
+  } catch (_) {
+    return { status: 'failed', url: null };
+  }
+}
 
 function waitCanPlay(video, timeoutMs = 2000) {
   return new Promise((resolve) => {

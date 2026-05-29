@@ -21,6 +21,7 @@ if (!global.__LOFI_STATE__) {
     videoCache: loadJson(VIDEO_CACHE_FILE, {}),
     generatedNodes: loadJson(NODE_CACHE_FILE, {}),
     nodeGenCache: loadJson(NODE_STATUS_FILE, {}),
+    videoPending: new Map(),
     nodePending: new Map(),
   };
   Object.assign(STORY_TREE.nodes, global.__LOFI_STATE__.generatedNodes);
@@ -73,16 +74,9 @@ app.get("/api/video", async (req, res) => {
   if (!node) return res.status(404).json({ error: "node not found" });
 
   const cacheKey = `${nodeId}_${type}`;
-  const entry = state.videoCache[cacheKey];
-  if (entry?.status === "ready" && entry?.url) return res.json(entry);
-  if (entry?.status === "generating") {
-    await pollVideoIfDue(cacheKey);
-    return res.json(state.videoCache[cacheKey]);
-  }
-
   const prompt = type === "action" ? node.actionPrompt : node.staticPrompt;
-  await startVideoGeneration(cacheKey, prompt);
-  return res.json(state.videoCache[cacheKey]);
+  const result = await ensureVideoReady(cacheKey, prompt, 56000);
+  return res.json(result);
 });
 
 app.post("/api/prefetch", async (req, res) => {
@@ -180,6 +174,17 @@ async function generateNode(universeId, parentNodeId, idx, choiceLabel, choiceSy
 async function startVideoGeneration(cacheKey, prompt) {
   const existing = state.videoCache[cacheKey];
   if (existing?.status === "ready" || existing?.status === "generating") return;
+  const started = await startVideoTask(prompt);
+  if (!started) {
+    state.videoCache[cacheKey] = { status: "failed", url: null };
+    saveVideoState();
+    return;
+  }
+  state.videoCache[cacheKey] = started;
+  saveVideoState();
+}
+
+async function startVideoTask(prompt) {
   const xDeviceId = crypto.randomUUID();
   const headers = {
     accept: "*/*",
@@ -206,72 +211,94 @@ async function startVideoGeneration(cacheKey, prompt) {
     const taskId = data.taskId || data.task_id || data.id;
     if (!taskId) throw new Error("missing task id");
     const cookie = r.headers.get("set-cookie") || "";
-    state.videoCache[cacheKey] = {
+    return {
       status: "generating",
       url: null,
       taskId,
       xDeviceId,
       cookie,
-      lastPollTs: 0,
       pollCount: 0,
     };
-    saveVideoState();
-  } catch (_err) {
-    state.videoCache[cacheKey] = { status: "failed", url: null };
-    saveVideoState();
+  } catch {
+    return null;
   }
 }
 
-async function pollVideoIfDue(cacheKey) {
-  const entry = state.videoCache[cacheKey];
-  if (!entry || entry.status !== "generating") return;
-  const now = Date.now();
-  if (now - Number(entry.lastPollTs || 0) < 2500) return;
-  if (Number(entry.pollCount || 0) > 110) {
-    state.videoCache[cacheKey] = { status: "failed", url: null };
-    saveVideoState();
-    return;
+async function ensureVideoReady(cacheKey, prompt, maxWaitMs = 56000) {
+  const existing = state.videoCache[cacheKey];
+  if (existing?.status === "ready" && existing?.url) return existing;
+
+  if (state.videoPending.has(cacheKey)) {
+    return state.videoPending.get(cacheKey);
   }
 
+  const pendingPromise = (async () => {
+    let task = state.videoCache[cacheKey];
+    if (!(task?.status === "generating" && task?.taskId)) {
+      const started = await startVideoTask(prompt);
+      if (!started) {
+        state.videoCache[cacheKey] = { status: "failed", url: null };
+        saveVideoState();
+        return state.videoCache[cacheKey];
+      }
+      task = started;
+      state.videoCache[cacheKey] = task;
+      saveVideoState();
+    }
+
+    const url = await pollVideoTask(task, maxWaitMs);
+    if (url) state.videoCache[cacheKey] = { status: "ready", url };
+    else state.videoCache[cacheKey] = { status: "failed", url: null };
+    saveVideoState();
+    return state.videoCache[cacheKey];
+  })();
+
+  state.videoPending.set(cacheKey, pendingPromise);
+  try {
+    return await pendingPromise;
+  } finally {
+    state.videoPending.delete(cacheKey);
+  }
+}
+
+async function pollVideoTask(task, maxWaitMs = 56000) {
+  const deadline = Date.now() + maxWaitMs;
   const headers = {
     accept: "*/*",
     "content-type": "application/json",
-    "x-device-id": entry.xDeviceId || crypto.randomUUID(),
+    "x-device-id": task.xDeviceId || crypto.randomUUID(),
     referer: "https://www.nanobananavideo.io/en/generation/text-to-video?resolution=480P&aspectRatio=16%3A9&duration=3s&model=Free+Mode",
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
   };
-  if (entry.cookie) headers.cookie = entry.cookie;
-  try {
-    const r = await fetch("https://www.nanobananavideo.io/api/generate-video", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        action: "check_status",
-        taskId: entry.taskId,
-        prompt: "",
-        size: "16:9",
-        withAudio: false,
-      }),
-    });
-    const j = await r.json();
-    entry.lastPollTs = now;
-    entry.pollCount = Number(entry.pollCount || 0) + 1;
-    if (j.status === "completed") {
-      const videoUrl = j.video_url || j.videoUrl || j.result?.video_url || j.result?.videoUrl || null;
-      if (videoUrl) state.videoCache[cacheKey] = { status: "ready", url: videoUrl };
-      else state.videoCache[cacheKey] = { status: "failed", url: null };
-    } else if (j.status === "failed" || j.status === "error") {
-      state.videoCache[cacheKey] = { status: "failed", url: null };
-    } else {
-      state.videoCache[cacheKey] = entry;
+  if (task.cookie) headers.cookie = task.cookie;
+
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch("https://www.nanobananavideo.io/api/generate-video", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          action: "check_status",
+          taskId: task.taskId,
+          prompt: "",
+          size: "16:9",
+          withAudio: false,
+        }),
+      });
+      const j = await r.json();
+      if (j.status === "completed") {
+        return j.video_url || j.videoUrl || j.result?.video_url || j.result?.videoUrl || null;
+      }
+      if (j.status === "failed" || j.status === "error") {
+        return null;
+      }
+    } catch {
+      // keep polling until deadline
     }
-    saveVideoState();
-  } catch (_err) {
-    entry.lastPollTs = now;
-    entry.pollCount = Number(entry.pollCount || 0) + 1;
-    state.videoCache[cacheKey] = entry;
-    saveVideoState();
+    await sleep(2500);
   }
+
+  return null;
 }
 
 async function generateNodeSync(universeId, storyPath, choiceLabel, choiceSymbol) {

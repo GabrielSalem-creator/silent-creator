@@ -114,6 +114,94 @@ function startNode(universeId, title, actionDesc, staticDesc, choices) {
   };
 }
 
+function secondNode(universeId, title, actionDesc, staticDesc, choices, narrativeContext = "", timeOfDay = "later that night") {
+  const { actionPrompt, staticPrompt } = buildPrompts(universeId, actionDesc, staticDesc, "", narrativeContext, timeOfDay);
+  return {
+    universeId,
+    title,
+    depth: 2,
+    timeOfDay,
+    location: "",
+    actionPrompt,
+    staticPrompt,
+    narrativeContext,
+    choices: choices.map((c) => ({ ...c, ...SYMBOL_META[c.symbol], nextNode: null })),
+  };
+}
+
+const SECOND_LAYER_TEMPLATES = {
+  "✨": {
+    title: "spark in motion",
+    action: "leans in with renewed focus, scribbles a concrete plan in quick strokes, then immediately executes the first step.",
+    static: "stays still over the plan, breathing steady, eyes locked on the next move as one screen glow pulses softly.",
+    choices: [
+      { symbol: "💼", name: "anchor", label: "ship a tiny prototype" },
+      { symbol: "💬", name: "kinetic", label: "invite a collaborator in" },
+    ],
+    context: "The idea is no longer abstract; it's becoming a real move in the world.",
+  },
+  "💼": {
+    title: "weight of execution",
+    action: "opens the practical checklist and commits to the hardest necessary task first, jaw set with quiet discipline.",
+    static: "holds posture upright in deliberate calm, reading the plan line by line while ambient lights hum around them.",
+    choices: [
+      { symbol: "✨", name: "spark", label: "pivot the core design" },
+      { symbol: "☕", name: "warm", label: "pause and think quietly" },
+    ],
+    context: "Progress is tangible, but every practical decision now carries visible weight.",
+  },
+  "💬": {
+    title: "voice in the silence",
+    action: "reaches out and starts a real conversation, listening more than speaking before replying with intent.",
+    static: "holds the device close and waits, expression softened, while one notification glow reflects across their face.",
+    choices: [
+      { symbol: "💼", name: "anchor", label: "schedule focused work block" },
+      { symbol: "❤️", name: "signal", label: "say what you feel" },
+    ],
+    context: "Connection changes the direction of the night more than any solo plan could.",
+  },
+  "🌸": {
+    title: "between memory and now",
+    action: "lets attention drift toward a private memory, then returns with one emotional truth they cannot ignore.",
+    static: "remains still in a reflective posture, blinking slowly as ambient motion continues behind them.",
+    choices: [
+      { symbol: "❤️", name: "signal", label: "follow the feeling tonight" },
+      { symbol: "💼", name: "anchor", label: "return to practical work" },
+    ],
+    context: "A quiet emotional current is now part of every decision ahead.",
+  },
+  "❤️": {
+    title: "open signal",
+    action: "takes one brave emotional step instead of hiding it, voice unsteady at first, then clear.",
+    static: "sits with the emotional aftermath, shoulders relaxed, breathing slow, waiting for what comes next.",
+    choices: [
+      { symbol: "💬", name: "kinetic", label: "send a vulnerable message" },
+      { symbol: "💼", name: "anchor", label: "channel it into work" },
+    ],
+    context: "Being honest changed the internal weather of the scene.",
+  },
+  "☕": {
+    title: "quiet reset",
+    action: "takes a deliberate pause, resets their rhythm, and returns with a calmer, cleaner intention.",
+    static: "stays grounded in stillness, eyes clear, one small ambient motion looping in the background.",
+    choices: [
+      { symbol: "✨", name: "spark", label: "capture a fresh idea" },
+      { symbol: "💼", name: "anchor", label: "resume clear priorities" },
+    ],
+    context: "A short reset prevented collapse and restored clarity.",
+  },
+  "💤": {
+    title: "drift threshold",
+    action: "lets fatigue take over for a moment, then surfaces with one vivid thread worth following.",
+    static: "rests in a still half-dream state, breathing evenly as environmental motion loops around them.",
+    choices: [
+      { symbol: "🌸", name: "wander", label: "follow the dream thread" },
+      { symbol: "💼", name: "anchor", label: "wake and execute plan" },
+    ],
+    context: "Rest revealed a subtle direction that force could not.",
+  },
+};
+
 const STORY_TREE = {
   universes: [
     { id: "monolith", name: "The Monolith", subtitle: "Mira · Solo Dev · 3 AM Tokyo", story: "A developer alone at night cracks the algorithm that will define her startup — and her life.", colors: { bg: "#060916", accent: "#7b2fee", secondary: "#00d4ff" }, soundtrack: "nocturne", startNode: "m_start", particles: "rain" },
@@ -138,6 +226,31 @@ const STORY_TREE = {
     ns_start: startNode("nightshift", "The Only Customer", "watches through the glass doors as the last customer walks away into the rain. He turns back to the perfectly arranged rows. Reaches out and straightens one onigiri that wasn't crooked.", "leans lightly against the counter, arms loose at his sides, watching the empty rain-wet street through the glass. Refrigerators hum. The scanner sits silent. Fluorescent light on everything.", [{ symbol: "☕", name: "warm", label: "eat from the shelves" }, { symbol: "💬", name: "kinetic", label: "text someone still awake" }]),
   },
 };
+
+function attachPredefinedSecondLayer(tree) {
+  for (const universe of tree.universes) {
+    const startNodeId = universe.startNode;
+    const start = tree.nodes[startNodeId];
+    if (!start || !Array.isArray(start.choices)) continue;
+    start.choices.forEach((choice, idx) => {
+      if (choice.nextNode) return;
+      const template = SECOND_LAYER_TEMPLATES[choice.symbol] || SECOND_LAYER_TEMPLATES["✨"];
+      const nodeId = `${startNodeId}_${idx === 0 ? "a" : "b"}`;
+      tree.nodes[nodeId] = secondNode(
+        start.universeId,
+        template.title,
+        template.action,
+        template.static,
+        template.choices,
+        template.context,
+        "later that night",
+      );
+      choice.nextNode = nodeId;
+    });
+  }
+}
+
+attachPredefinedSecondLayer(STORY_TREE);
 
 const STATIONS = [
   { id: "default", name: "Default", url: "https://usa9.fastcast4u.com/proxy/jamz?mp=/1" },

@@ -23,6 +23,7 @@ if (!global.__LOFI_STATE__) {
     nodeGenCache: loadJson(NODE_STATUS_FILE, {}),
     videoPending: new Map(),
     nodePending: new Map(),
+    prewarmPending: new Map(),
   };
   Object.assign(STORY_TREE.nodes, global.__LOFI_STATE__.generatedNodes);
 }
@@ -65,6 +66,31 @@ const BANNED_REALISM = [
 
 app.get("/api/story-tree", (_req, res) => res.json(STORY_TREE));
 app.get("/api/stations", (_req, res) => res.json(STATIONS));
+
+app.post("/api/prewarm-predefined", async (req, res) => {
+  const universeId = String(req.body?.universeId || "");
+  const wait = Boolean(req.body?.wait);
+  const timeoutMs = Number(req.body?.timeoutMs || 20000);
+  const key = universeId || "__all__";
+
+  let promise = state.prewarmPending.get(key);
+  if (!promise) {
+    promise = runPrewarmPredefined(universeId).finally(() => {
+      state.prewarmPending.delete(key);
+    });
+    state.prewarmPending.set(key, promise);
+  }
+
+  if (!wait) {
+    return res.json({ status: "warming", scope: key });
+  }
+
+  const result = await Promise.race([
+    promise,
+    sleep(timeoutMs).then(() => ({ status: "warming", scope: key })),
+  ]);
+  return res.json(result);
+});
 
 app.get("/api/video", async (req, res) => {
   const nodeId = String(req.query.nodeId || "");
@@ -163,6 +189,44 @@ async function handleVideoRequest(nodeId, type, promptInput = "") {
 
   const cacheKey = `${nodeId}_${type}`;
   return ensureVideoReady(cacheKey, prompt, 56000);
+}
+
+async function runPrewarmPredefined(universeId = "") {
+  const targets = [];
+  const universes = universeId
+    ? STORY_TREE.universes.filter((u) => u.id === universeId)
+    : STORY_TREE.universes;
+
+  for (const u of universes) {
+    const startId = u.startNode;
+    const startNode = STORY_TREE.nodes[startId];
+    if (!startNode) continue;
+
+    const nodeIds = [startId];
+    for (const choice of startNode.choices || []) {
+      if (choice.nextNode) nodeIds.push(choice.nextNode);
+    }
+
+    for (const nodeId of nodeIds) {
+      const node = STORY_TREE.nodes[nodeId];
+      if (!node) continue;
+      targets.push({ nodeId, type: "action", prompt: node.actionPrompt });
+      targets.push({ nodeId, type: "static", prompt: node.staticPrompt });
+    }
+  }
+
+  const prepared = await mapLimit(targets, 2, async (t) => {
+    const r = await ensureVideoReady(`${t.nodeId}_${t.type}`, t.prompt, 60000);
+    return r.status === "ready" && !!r.url;
+  });
+
+  const readyCount = prepared.filter(Boolean).length;
+  return {
+    status: readyCount === targets.length ? "ready" : "partial",
+    scope: universeId || "__all__",
+    total: targets.length,
+    ready: readyCount,
+  };
 }
 
 async function generateNode(universeId, parentNodeId, idx, choiceLabel, choiceSymbol, storyPath) {
@@ -460,4 +524,20 @@ function saveNodeState() {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function mapLimit(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const n = Math.max(1, limit);
+  const runners = Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (true) {
+      const i = cursor;
+      cursor += 1;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i], i);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }

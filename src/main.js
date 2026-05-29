@@ -55,6 +55,8 @@ async function init() {
   initIntroCanvas();
   initCardParticles();
   initMusic();
+  // Start pre-warming predefined scenes in background before user starts.
+  kickPrewarmPredefined();
   show('intro');
 
   // Any click/key goes to universe select
@@ -190,6 +192,9 @@ function animateCardParticles(containerId, type, color) {
 
 // ── Universe cards click ─────────────────────────────────────────────────────
 document.querySelectorAll('.ucard').forEach(card => {
+  card.addEventListener('mouseenter', () => {
+    kickPrewarmPredefined(card.dataset.id);
+  });
   card.addEventListener('click', () => {
     S.storyPath = [];
     S.worldState = { locationsVisited: [], usedChoices: [] };
@@ -352,6 +357,9 @@ function changeStation(dir) {
 async function startUniverse(universeId) {
   const universe = S.tree.universes.find(u => u.id === universeId);
   if (!universe) return;
+
+  // Make sure predefined start + first 2 branch videos are prepared early.
+  await kickPrewarmPredefined(universeId, true, 25000);
 
   S.universe = universe;
   startSceneCanvas(universeId);
@@ -704,6 +712,19 @@ function updateDepthDots(depth) {
 
 // ── Utils ────────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function kickPrewarmPredefined(universeId = '', wait = false, timeoutMs = 15000) {
+  try {
+    const res = await fetch('/api/prewarm-predefined', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ universeId, wait, timeoutMs }),
+    });
+    return await res.json();
+  } catch (_) {
+    return { status: 'failed' };
+  }
+}
 
 async function prepareDecisionMedia(node) {
   // Ensure both choices have generated next nodes first.

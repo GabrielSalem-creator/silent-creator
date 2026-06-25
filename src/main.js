@@ -450,8 +450,17 @@ async function waitForVideo(nodeId, type, opts = {}) {
 }
 
 async function playActionThenStatic(actionUrl, staticUrl, node) {
+  // Start preparing next-branch media as early as possible.
+  let decisionPrepPromise = prepareDecisionMedia(node);
+  const decisionMinWaitPromise = sleep(8000);
+
   // If no video, just go straight to static scene + choices
   if (!actionUrl && !staticUrl) {
+    let prepared = false;
+    while (!prepared) {
+      [prepared] = await Promise.all([decisionPrepPromise, decisionMinWaitPromise]);
+      if (!prepared) decisionPrepPromise = prepareDecisionMedia(node);
+    }
     showChoices(node.choices);
     return;
   }
@@ -487,10 +496,12 @@ async function playActionThenStatic(actionUrl, staticUrl, node) {
     } catch(e) {}
   }
 
-  // Critical UX: decisions appear only after both branches are fully prepared
-  // (node + action/static videos generated and preloaded in browser cache).
-  while (!(await prepareDecisionMedia(node))) {
-    // Strict requirement: do not show decisions until branch media is ready.
+  // Buttons are delayed until branch media is prepared + minimum wait elapsed.
+  // This ensures that once buttons appear, selecting one should play immediately.
+  while (true) {
+    const [prepared] = await Promise.all([decisionPrepPromise, decisionMinWaitPromise]);
+    if (prepared) break;
+    decisionPrepPromise = prepareDecisionMedia(node);
     await sleep(900);
     updateLoadingMsg();
   }

@@ -35,7 +35,10 @@ const choices = $('choices');
 const sceneCanvas = $('scene-canvas');
 const sceneCtx = sceneCanvas.getContext('2d');
 const VIDEO_URL_CACHE_KEY = 'lofi_video_urls_v1';
+const VIDEO_PROMPT_CACHE_KEY = 'lofi_video_prompt_urls_v1';
 const LOCAL_VIDEO_CACHE = loadLocalVideoCache();
+const LOCAL_PROMPT_CACHE = loadLocalPromptCache();
+const PREWARMED_UNIVERSES = new Set();
 
 // ── Screen transitions ───────────────────────────────────────────────────────
 function show(name) {
@@ -55,8 +58,8 @@ async function init() {
   initIntroCanvas();
   initCardParticles();
   initMusic();
-  // Start pre-warming predefined scenes in background before user starts.
-  kickPrewarmPredefined();
+  // Do not prewarm all universes globally (can trigger rate limits).
+  // Prewarm selected universe on hover/click instead.
   show('intro');
 
   // Any click/key goes to universe select
@@ -193,6 +196,8 @@ function animateCardParticles(containerId, type, color) {
 // ── Universe cards click ─────────────────────────────────────────────────────
 document.querySelectorAll('.ucard').forEach(card => {
   card.addEventListener('mouseenter', () => {
+    if (PREWARMED_UNIVERSES.has(card.dataset.id)) return;
+    PREWARMED_UNIVERSES.add(card.dataset.id);
     kickPrewarmPredefined(card.dataset.id);
   });
   card.addEventListener('click', () => {
@@ -359,7 +364,7 @@ async function startUniverse(universeId) {
   if (!universe) return;
 
   // Make sure predefined start + first 2 branch videos are prepared early.
-  await kickPrewarmPredefined(universeId, true, 25000);
+  await kickPrewarmPredefined(universeId, true, 45000);
 
   S.universe = universe;
   startSceneCanvas(universeId);
@@ -424,12 +429,18 @@ async function waitForVideo(nodeId, type, opts = {}) {
   if (local) return local;
   const node = S.tree.nodes[nodeId];
   const prompt = type === 'action' ? (node?.actionPrompt || '') : (node?.staticPrompt || '');
+  const byPrompt = getLocalPromptVideoUrl(prompt);
+  if (byPrompt) {
+    setLocalVideoUrl(nodeId, type, byPrompt);
+    return byPrompt;
+  }
   // Backend now performs deterministic generation/polling per request.
   // Retry failed/transient responses by calling again (can trigger a fresh generation).
   for (let i = 0; i < attempts; i++) {
     const r = await apiVideo(nodeId, type, prompt);
     if (r.status === 'ready' && r.url) {
       setLocalVideoUrl(nodeId, type, r.url);
+      setLocalPromptVideoUrl(prompt, r.url);
       return r.url;
     }
     await sleep(delayMs);
@@ -767,9 +778,15 @@ async function prepareDecisionMedia(node) {
 async function ensureDecisionVideoReady(nodeId, type, prompt) {
   const cached = getLocalVideoUrl(nodeId, type);
   if (cached) return cached;
+  const byPrompt = getLocalPromptVideoUrl(prompt);
+  if (byPrompt) {
+    setLocalVideoUrl(nodeId, type, byPrompt);
+    return byPrompt;
+  }
   const r = await apiVideo(nodeId, type, prompt);
   if (r.status === 'ready' && r.url) {
     setLocalVideoUrl(nodeId, type, r.url);
+    setLocalPromptVideoUrl(prompt, r.url);
     return r.url;
   }
   return '';
@@ -843,9 +860,23 @@ function loadLocalVideoCache() {
   }
 }
 
+function loadLocalPromptCache() {
+  try {
+    return JSON.parse(localStorage.getItem(VIDEO_PROMPT_CACHE_KEY) || '{}');
+  } catch (_) {
+    return {};
+  }
+}
+
 function saveLocalVideoCache() {
   try {
     localStorage.setItem(VIDEO_URL_CACHE_KEY, JSON.stringify(LOCAL_VIDEO_CACHE));
+  } catch (_) {}
+}
+
+function saveLocalPromptCache() {
+  try {
+    localStorage.setItem(VIDEO_PROMPT_CACHE_KEY, JSON.stringify(LOCAL_PROMPT_CACHE));
   } catch (_) {}
 }
 
@@ -859,6 +890,28 @@ function setLocalVideoUrl(nodeId, type, url) {
   if (LOCAL_VIDEO_CACHE[nodeId][type] === url) return;
   LOCAL_VIDEO_CACHE[nodeId][type] = url;
   saveLocalVideoCache();
+}
+
+function getLocalPromptVideoUrl(prompt) {
+  if (!prompt) return '';
+  return LOCAL_PROMPT_CACHE[promptHash(prompt)] || '';
+}
+
+function setLocalPromptVideoUrl(prompt, url) {
+  if (!prompt || !url) return;
+  const key = promptHash(prompt);
+  if (LOCAL_PROMPT_CACHE[key] === url) return;
+  LOCAL_PROMPT_CACHE[key] = url;
+  saveLocalPromptCache();
+}
+
+function promptHash(text) {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16);
 }
 
 function addPreconnectHints() {

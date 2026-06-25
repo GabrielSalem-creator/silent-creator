@@ -10,6 +10,7 @@ const SAVE_DIR = process.env.VERCEL ? "/tmp/lofi-cache" : path.join(process.cwd(
 const VIDEO_CACHE_FILE = path.join(SAVE_DIR, "video_cache.json");
 const NODE_CACHE_FILE = path.join(SAVE_DIR, "generated_nodes.json");
 const NODE_STATUS_FILE = path.join(SAVE_DIR, "node_status.json");
+const PROMPT_CACHE_FILE = path.join(SAVE_DIR, "prompt_cache.json");
 
 const app = express();
 app.use(cors());
@@ -19,6 +20,7 @@ if (!global.__LOFI_STATE__) {
   fs.mkdirSync(SAVE_DIR, { recursive: true });
   global.__LOFI_STATE__ = {
     videoCache: loadJson(VIDEO_CACHE_FILE, {}),
+    promptCache: loadJson(PROMPT_CACHE_FILE, {}),
     generatedNodes: loadJson(NODE_CACHE_FILE, {}),
     nodeGenCache: loadJson(NODE_STATUS_FILE, {}),
     videoPending: new Map(),
@@ -200,6 +202,13 @@ async function handleVideoRequest(nodeId, type, promptInput = "") {
   }
 
   const cacheKey = `${nodeId}_${type}`;
+  const promptKey = promptHash(prompt);
+  const cachedByPrompt = state.promptCache[promptKey];
+  if (cachedByPrompt) {
+    state.videoCache[cacheKey] = { status: "ready", url: cachedByPrompt };
+    saveVideoState();
+    return state.videoCache[cacheKey];
+  }
   return ensureVideoReady(cacheKey, prompt, 56000);
 }
 
@@ -227,7 +236,8 @@ async function runPrewarmPredefined(universeId = "") {
     }
   }
 
-  const prepared = await mapLimit(targets, 2, async (t) => {
+  const concurrency = universeId ? 3 : 1;
+  const prepared = await mapLimit(targets, concurrency, async (t) => {
     const r = await ensureVideoReady(`${t.nodeId}_${t.type}`, t.prompt, 60000);
     return r.status === "ready" && !!r.url;
   });
@@ -281,6 +291,14 @@ async function startVideoGeneration(cacheKey, prompt) {
 }
 
 async function ensureVideoReady(cacheKey, prompt, maxWaitMs = 56000) {
+  const pKey = promptHash(prompt);
+  const urlByPrompt = state.promptCache[pKey];
+  if (urlByPrompt) {
+    state.videoCache[cacheKey] = { status: "ready", url: urlByPrompt };
+    saveVideoState();
+    return state.videoCache[cacheKey];
+  }
+
   const existing = state.videoCache[cacheKey];
   if (existing?.status === "ready" && existing?.url) return existing;
 
@@ -292,9 +310,13 @@ async function ensureVideoReady(cacheKey, prompt, maxWaitMs = 56000) {
     state.videoCache[cacheKey] = { status: "generating", url: null };
     saveVideoState();
     const url = await generateVondyVideoWithRotation(prompt, maxWaitMs);
-    if (url) state.videoCache[cacheKey] = { status: "ready", url };
+    if (url) {
+      state.videoCache[cacheKey] = { status: "ready", url };
+      state.promptCache[pKey] = url;
+    }
     else state.videoCache[cacheKey] = { status: "failed", url: null };
     saveVideoState();
+    savePromptState();
     return state.videoCache[cacheKey];
   })();
 
@@ -547,6 +569,14 @@ function saveVideoState() {
 function saveNodeState() {
   saveJson(NODE_CACHE_FILE, state.generatedNodes);
   saveJson(NODE_STATUS_FILE, state.nodeGenCache);
+}
+
+function savePromptState() {
+  saveJson(PROMPT_CACHE_FILE, state.promptCache);
+}
+
+function promptHash(prompt) {
+  return crypto.createHash("sha256").update(String(prompt || "")).digest("hex").slice(0, 24);
 }
 
 function sleep(ms) {

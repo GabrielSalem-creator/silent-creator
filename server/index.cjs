@@ -64,6 +64,18 @@ const BANNED_REALISM = [
   "documentary",
 ];
 
+const VONDY_API_URL = "https://api.apivondy.com/api/open/video/generate";
+const VONDY_MAX_RETRIES = 5;
+const VONDY_RETRY_DELAY_MS = 2000;
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15",
+];
+
 app.get("/api/story-tree", (_req, res) => res.json(STORY_TREE));
 app.get("/api/stations", (_req, res) => res.json(STATIONS));
 
@@ -260,54 +272,12 @@ async function generateNode(universeId, parentNodeId, idx, choiceLabel, choiceSy
 async function startVideoGeneration(cacheKey, prompt) {
   const existing = state.videoCache[cacheKey];
   if (existing?.status === "ready" || existing?.status === "generating") return;
-  const started = await startVideoTask(prompt);
-  if (!started) {
+  state.videoCache[cacheKey] = { status: "generating", url: null };
+  saveVideoState();
+  ensureVideoReady(cacheKey, prompt, 60000).catch(() => {
     state.videoCache[cacheKey] = { status: "failed", url: null };
     saveVideoState();
-    return;
-  }
-  state.videoCache[cacheKey] = started;
-  saveVideoState();
-}
-
-async function startVideoTask(prompt) {
-  const xDeviceId = crypto.randomUUID();
-  const headers = {
-    accept: "*/*",
-    "accept-language": "en-GB,en-US;q=0.9,en;q=0.8,fr;q=0.7",
-    "content-type": "application/json",
-    "sec-ch-ua": '"Chromium";v="116", "Not)A;Brand";v="24", "Google Chrome";v="116"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"macOS"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-    "x-device-id": xDeviceId,
-    referer: "https://www.nanobananavideo.io/en/generation/text-to-video?resolution=480P&aspectRatio=16%3A9&duration=3s&model=Free+Mode",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
-  };
-  try {
-    const r = await fetch("https://www.nanobananavideo.io/api/generate-video", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ action: "generate", prompt, size: "16:9", withAudio: false }),
-    });
-    if (!r.ok) throw new Error(`generate http ${r.status}`);
-    const data = await r.json();
-    const taskId = data.taskId || data.task_id || data.id;
-    if (!taskId) throw new Error("missing task id");
-    const cookie = r.headers.get("set-cookie") || "";
-    return {
-      status: "generating",
-      url: null,
-      taskId,
-      xDeviceId,
-      cookie,
-      pollCount: 0,
-    };
-  } catch {
-    return null;
-  }
+  });
 }
 
 async function ensureVideoReady(cacheKey, prompt, maxWaitMs = 56000) {
@@ -319,20 +289,9 @@ async function ensureVideoReady(cacheKey, prompt, maxWaitMs = 56000) {
   }
 
   const pendingPromise = (async () => {
-    let task = state.videoCache[cacheKey];
-    if (!(task?.status === "generating" && task?.taskId)) {
-      const started = await startVideoTask(prompt);
-      if (!started) {
-        state.videoCache[cacheKey] = { status: "failed", url: null };
-        saveVideoState();
-        return state.videoCache[cacheKey];
-      }
-      task = started;
-      state.videoCache[cacheKey] = task;
-      saveVideoState();
-    }
-
-    const url = await pollVideoTask(task, maxWaitMs);
+    state.videoCache[cacheKey] = { status: "generating", url: null };
+    saveVideoState();
+    const url = await generateVondyVideoWithRotation(prompt, maxWaitMs);
     if (url) state.videoCache[cacheKey] = { status: "ready", url };
     else state.videoCache[cacheKey] = { status: "failed", url: null };
     saveVideoState();
@@ -347,43 +306,62 @@ async function ensureVideoReady(cacheKey, prompt, maxWaitMs = 56000) {
   }
 }
 
-async function pollVideoTask(task, maxWaitMs = 56000) {
+async function generateVondyVideoWithRotation(prompt, maxWaitMs = 56000) {
   const deadline = Date.now() + maxWaitMs;
-  const headers = {
-    accept: "*/*",
-    "content-type": "application/json",
-    "x-device-id": task.xDeviceId || crypto.randomUUID(),
-    referer: "https://www.nanobananavideo.io/en/generation/text-to-video?resolution=480P&aspectRatio=16%3A9&duration=3s&model=Free+Mode",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
-  };
-  if (task.cookie) headers.cookie = task.cookie;
+  for (let attempt = 1; attempt <= VONDY_MAX_RETRIES; attempt += 1) {
+    if (Date.now() >= deadline) break;
+    const ua = pickUserAgent();
+    const xDeviceId = randomDeviceId();
+    const headers = {
+      "Content-Type": "application/json",
+      "User-Agent": ua,
+      "sec-ch-ua": secChUaFromUa(ua),
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": platformFromUa(ua),
+      "x-vondy-tier": "lite",
+      "x-device-id": xDeviceId,
+      Referer: "https://vondy.com/",
+      Origin: "https://vondy.com/",
+      Accept: "application/json, text/plain, */*",
+      "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
+    };
+    const payload = {
+      prompt,
+      duration: "5",
+      aspectRatio: "16:9",
+      resolution: "720p",
+      cameraFixed: false,
+    };
 
-  while (Date.now() < deadline) {
     try {
-      const r = await fetch("https://www.nanobananavideo.io/api/generate-video", {
+      const r = await fetch(VONDY_API_URL, {
         method: "POST",
         headers,
-        body: JSON.stringify({
-          action: "check_status",
-          taskId: task.taskId,
-          prompt: "",
-          size: "16:9",
-          withAudio: false,
-        }),
+        body: JSON.stringify(payload),
       });
-      const j = await r.json();
-      if (j.status === "completed") {
-        return j.video_url || j.videoUrl || j.result?.video_url || j.result?.videoUrl || null;
+      let body = {};
+      try {
+        body = await r.json();
+      } catch {
+        body = {};
       }
-      if (j.status === "failed" || j.status === "error") {
-        return null;
+
+      const url = extractVideoUrl(body);
+      if (r.ok && url) return url;
+
+      const limited = r.status === 429 || String(body?.message || body?.error || "").toLowerCase().includes("limit");
+      if (limited && Date.now() < deadline) {
+        await sleep(VONDY_RETRY_DELAY_MS * attempt);
+        continue;
       }
     } catch {
-      // keep polling until deadline
+      // network/transient error, rotate session and retry
     }
-    await sleep(2500);
-  }
 
+    if (attempt < VONDY_MAX_RETRIES && Date.now() < deadline) {
+      await sleep(VONDY_RETRY_DELAY_MS * attempt);
+    }
+  }
   return null;
 }
 
@@ -495,6 +473,55 @@ function sanitizeAnime(value) {
 function patchParent(parentNodeId, idx, nodeId) {
   const parent = STORY_TREE.nodes[parentNodeId];
   if (parent && Array.isArray(parent.choices) && parent.choices[idx]) parent.choices[idx].nextNode = nodeId;
+}
+
+function pickUserAgent() {
+  const i = Math.floor(Math.random() * USER_AGENTS.length);
+  return USER_AGENTS[i];
+}
+
+function secChUaFromUa(ua) {
+  if (ua.includes("Firefox")) return '"Firefox";v="135", "Not.A/Brand";v="8"';
+  if (ua.includes("Safari") && !ua.includes("Chrome")) return '"Safari";v="18", "Not.A/Brand";v="8"';
+  const m = ua.match(/Chrome\/(\d+)/);
+  const v = m?.[1] || "147";
+  return `"Google Chrome";v="${v}", "Not.A/Brand";v="8", "Chromium";v="${v}"`;
+}
+
+function platformFromUa(ua) {
+  if (ua.includes("Windows")) return '"Windows"';
+  if (ua.includes("Mac")) return '"macOS"';
+  if (ua.includes("Linux")) return '"Linux"';
+  return '"Unknown"';
+}
+
+function randomDeviceId() {
+  const p1 = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  const p2 = crypto.randomUUID().replace(/-/g, "").slice(0, 14);
+  const p3 = Date.now().toString(16);
+  const p4 = Math.floor(Math.random() * 0xffffffff).toString(16);
+  return `${p1}-${p2}-${p3}-${p4}`;
+}
+
+function extractVideoUrl(responseData) {
+  if (!responseData || typeof responseData !== "object") return null;
+  const candidates = [
+    responseData.url,
+    responseData.resultUrl,
+    responseData.videoUrl,
+    responseData.video_url,
+    responseData?.data?.url,
+    responseData?.result?.url,
+    responseData?.result?.videoUrl,
+    responseData?.result?.video_url,
+  ];
+  for (const v of candidates) {
+    if (typeof v === "string" && v.startsWith("http")) return v;
+  }
+  for (const value of Object.values(responseData)) {
+    if (typeof value === "string" && value.startsWith("http") && value.includes(".mp4")) return value;
+  }
+  return null;
 }
 
 function loadJson(filePath, fallback) {
